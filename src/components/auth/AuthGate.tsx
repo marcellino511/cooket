@@ -47,7 +47,7 @@ export function SignIn() {
       <div className="rounded-card border border-line bg-surface p-7 shadow-card sm:p-8">
         <LogoMark className="size-11" />
         <h1 className="mt-6 text-2xl font-semibold tracking-tight text-ink">Pay and get paid in USDC</h1>
-        <p className="mt-2 text-sm text-muted">Sign in with email, Google, or a wallet you already own. If you do not have a wallet, Privy creates one for you.</p>
+        <p className="mt-2 text-sm text-muted">Sign in with email, Google, X, or a wallet you already own. If you do not have a wallet, Privy creates one for you.</p>
         <div className="mt-6">
           <ConnectWalletButton full size="lg" label="Sign in to Cooket" />
         </div>

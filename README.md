@@ -8,7 +8,7 @@ Built with [Arc Studio](https://studio.arc.io)
 
 ## What you can do
 
-- Sign in with email, Google, or an existing wallet. Privy creates a wallet if you do not have one.
+- Sign in with email, Google, X, or an existing wallet. Privy creates a wallet if you do not have one.
 - See your real USDC balance, recent payments, and monthly totals.
 - Send USDC with a guided flow: recipient, amount, review, confirmation, and result. Every payment is approved in your wallet.
 - Receive USDC with your address and a QR code.
@@ -35,7 +35,7 @@ bun run test:router   # payment verification against a local test chain (needs F
 
 ### Privy setup
 
-In the Privy Dashboard for your app, enable the Email, Google, and Wallet login methods, enable embedded wallets, and add every origin the app runs on (including your deployed domain and any preview domain) to the allowed origins. Without this, sign-in fails.
+In the Privy Dashboard for your app, enable the Email, Google, X (Twitter), and Wallet login methods (the app lists them in `src/main.tsx`, so a method enabled only in the dashboard will not appear until it is listed there; X's id is `twitter`), enable embedded wallets, and add every origin the app runs on (including your deployed domain and any preview domain) to the allowed origins. Without this, sign-in fails. For X, Privy's default credentials work for testing. For production, create your own X app as a confidential client (Web app, Automated App or Bot), set its redirect URI to `https://auth.privy.io/api/v1/oauth/callback`, and enter its Client ID and Secret in the Privy Dashboard under Login methods.
 
 ### Environment variables
 

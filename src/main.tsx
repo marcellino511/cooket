@@ -81,7 +81,8 @@ createRoot(document.getElementById('root')!).render(
       appId={PRIVY_APP_ID}
       config={{
         appearance: { theme: 'dark', accentColor: '#60A5FA', showWalletLoginFirst: false },
-        loginMethods: ['email', 'google', 'wallet'],
+        // Privy shows only the methods listed here, even when more are enabled in the dashboard. 'twitter' is Privy's id for X.
+        loginMethods: ['email', 'google', 'twitter', 'wallet'],
         embeddedWallets: { ethereum: { createOnLogin: 'users-without-wallets' } },
         defaultChain: ARC_VIEM_CHAIN,
         supportedChains: [ARC_VIEM_CHAIN],
