@@ -1,0 +1,13 @@
+node_modules
+.env
+.env.*
+server/data
+.circle
+dist
+# Runtime logs written by the Arc Studio preview
+console.jsonl
+traces.jsonl
+# Foundry build output and vendored dependency (restore with forge install)
+contracts/cache
+contracts/out
+lib/
