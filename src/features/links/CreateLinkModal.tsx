@@ -73,6 +73,8 @@ function Form({ onClose }: { onClose: () => void }) {
     try {
       const issuedAt = Date.now()
       const finalExpiry = expiry === 'never' ? undefined : expiry === 'custom' ? expiresAt : issuedAt + EXPIRY_MS[expiry]
+      // The server decides which router new links bind to; the merchant signs exactly that.
+      const { router } = await linksApi.config()
       const input = {
         recipient: address,
         description: description.trim(),
@@ -82,6 +84,7 @@ function Form({ onClose }: { onClose: () => void }) {
         expiresAt: finalExpiry,
         issuedAt,
         nonce: randomId(16),
+        router: router ?? undefined,
       }
       const signature = await signMessageAsync({ message: buildCreateMessage(input, network.usdcAddress) })
       const link = await linksApi.create(await token(), { ...input, signature })

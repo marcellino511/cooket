@@ -37,6 +37,8 @@ export interface CreateLinkBody extends CreateLinkInput {
 }
 
 export const linksApi = {
+  /** Server-side settings the merchant needs before signing: which router (if any) new links bind to. */
+  config: () => request<{ router: `0x${string}` | null }>('/health'),
   get: (id: string) => request<PublicLink>(`/links/${encodeURIComponent(id)}`),
   list: (token: string) => request<{ links: MerchantLink[] }>('/links', {}, token).then((r) => r.links),
   create: (token: string, body: CreateLinkBody) => request<PublicLink>('/links', { method: 'POST', body: JSON.stringify(body) }, token),

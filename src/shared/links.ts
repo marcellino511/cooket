@@ -38,6 +38,11 @@ export interface PublicLink {
   expiresAt?: number
   createdAt: number
   status: LinkStatus
+  /**
+   * The CooketPayRouter that must settle payments for this link. When set, only a PaymentReceived event from this
+   * contract counts as payment. Links created before the router existed have no router and keep direct-transfer verification.
+   */
+  router?: `0x${string}`
 }
 
 /** What the merchant sees: the public view plus verified payments. */
@@ -55,6 +60,8 @@ export interface CreateLinkInput {
   expiresAt?: number
   issuedAt: number
   nonce: string
+  /** The router the merchant is approving for this link, or undefined for a direct-transfer link. */
+  router?: `0x${string}`
 }
 
 /** The exact text the merchant's wallet signs. The server rebuilds it from the request and verifies the signature. */
@@ -68,6 +75,7 @@ export function buildCreateMessage(input: CreateLinkInput, usdcAddress: string):
     `Amount: ${input.mode === 'fixed' ? (input.amount ?? '') : 'payer chooses'}`,
     `Description: ${input.description}`,
     `Merchant: ${input.merchant ?? ''}`,
+    `Settlement: ${input.router ? `CooketPayRouter ${input.router}` : 'direct USDC transfer'}`,
     `Expires: ${input.expiresAt ? new Date(input.expiresAt).toISOString() : 'never'}`,
     `Issued: ${new Date(input.issuedAt).toISOString()}`,
     `Nonce: ${input.nonce}`,

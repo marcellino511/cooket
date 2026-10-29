@@ -14,6 +14,8 @@ export interface DbLink {
   expiresAt?: number
   createdAt: number
   inactive?: boolean
+  /** Set when the link was created while a router was configured. */
+  router?: `0x${string}`
 }
 
 export interface Db {

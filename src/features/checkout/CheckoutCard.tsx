@@ -9,6 +9,7 @@ import { LogoMark } from '@/components/layout/Wordmark'
 import { FiatEstimate } from '@/components/common/Money'
 import { useGasBalance, useSession, useUsdcBalance } from '@/chain/useSession'
 import { useSendUsdc } from '@/chain/useSendUsdc'
+import { useRouterCheckout } from '@/chain/useRouterCheckout'
 import { formatDateTime, formatUsdcPrecise, shortAddress } from '@/lib/format'
 import { ARC_NETWORK } from '@/lib/networks'
 import { ApiError, linksApi } from '@/api/links'
@@ -61,8 +62,14 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
   const insufficient = chosen.raw !== undefined && balance.raw !== undefined && chosen.raw > balance.raw
   const noGas = !network.isArc && gas.raw !== undefined && gas.raw === 0n
 
-  const { phase } = sender.state
-  const hash = sender.state.hash
+  // Links created with a router settle through the CooketPayRouter (approve, then pay). Older links keep a direct transfer.
+  const viaRouter = Boolean(link.router)
+  const flow = useRouterCheckout({ network, router: link.router, linkId: request.id, recipient: request.recipient, amountRaw: chosen.raw, note: request.description || undefined })
+  const payState = viaRouter ? flow.pay : sender.state
+  const { phase, hash } = payState
+  const payError = payState.error
+  const busy = viaRouter ? flow.busy : sender.isBusy
+  const approving = flow.approval.phase === 'signing' || flow.approval.phase === 'confirming'
   const done = phase === 'confirmed'
   const verify = useMutation({ mutationFn: (txHash: string) => linksApi.verifyPayment(request.id, txHash) })
   const verifyMutate = verify.mutate
@@ -75,10 +82,18 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
   const pay = async () => {
     if (!request.recipient || chosen.raw === undefined || expired || inactive || alreadyPaid) return
     if (request.expiresAt && Date.now() > request.expiresAt) return
+    if (viaRouter) {
+      await flow.submit()
+      return
+    }
     await sender.send({ to: request.recipient, amountRaw: chosen.raw, note: request.description || undefined, kind: 'payment-link', linkId: request.id })
   }
 
-  const payLabel = chosen.raw !== undefined ? `Pay ${formatUsdcPrecise(chosen.raw)} USDC` : 'Enter an amount'
+  const amountText = chosen.raw !== undefined ? formatUsdcPrecise(chosen.raw) : undefined
+  const payLabel = amountText ? `Pay ${amountText} USDC` : 'Enter an amount'
+  const needsApproval = viaRouter && flow.needsApproval === true
+  const approvalUnknown = viaRouter && !approving && flow.needsApproval === undefined && chosen.raw !== undefined && !preview
+  const primaryLabel = phase === 'signing' ? 'Confirm in wallet…' : needsApproval ? (approving ? 'Approving…' : `Approve ${amountText ?? ''} USDC`) : approvalUnknown ? 'Checking approval…' : payLabel
 
   return (
     <div className="overflow-hidden rounded-card border border-line bg-surface shadow-card">
@@ -147,6 +162,20 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
               )}
             </dd>
           </div>
+          {link.router && (
+            <div className="flex items-start justify-between gap-4 py-3">
+              <dt className="text-muted">Payment contract</dt>
+              <dd className="text-right">
+                <span className="inline-flex items-center gap-1">
+                  <Address value={link.router} className="text-xs" />
+                  <CopyButton value={link.router} label="Copy contract address" iconOnly />
+                </span>
+                <ExternalAnchor href={buildAddressExplorerUrl(network.chainId, link.router)} className="mt-0.5 text-xs">
+                  View contract
+                </ExternalAnchor>
+              </dd>
+            </div>
+          )}
           <div className="flex justify-between gap-4 py-3">
             <dt className="text-muted">Network</dt>
             <dd className="font-medium text-ink">{network.name}</dd>
@@ -205,9 +234,31 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
             {inactive && <Notice tone="danger" title="This payment link was turned off">The merchant deactivated it. Ask them for a new link.</Notice>}
             {alreadyPaid && <Notice tone="success" title="This link has already been paid">A payment was verified for this fixed-amount link.</Notice>}
             {isOwnLink && <Notice tone="warning" title="This is your own link">You cannot pay yourself.</Notice>}
-            {(phase === 'failed' || phase === 'reverted') && sender.state.error && (
-              <Notice tone="danger" title={sender.state.error.title}>
-                {sender.state.error.detail} {sender.state.error.recovery}
+            {(phase === 'failed' || phase === 'reverted') && payError && (
+              <Notice tone="danger" title={payError.title}>
+                {payError.detail} {payError.recovery}
+              </Notice>
+            )}
+            {viaRouter && flow.approval.phase === 'failed' && flow.approval.error && (
+              <Notice tone="danger" title={flow.approval.error.title}>
+                {flow.approval.error.detail} {flow.approval.error.recovery}
+              </Notice>
+            )}
+            {viaRouter && flow.approval.phase === 'unconfirmed' && (
+              <Notice tone="warning" title="Approval still pending">
+                Your approval was submitted but is not confirmed yet. This page keeps checking. Do not approve again.
+              </Notice>
+            )}
+            {viaRouter && flow.allowanceError && (
+              <Notice tone="warning" title="Could not read your approval">
+                The Arc Mainnet RPC did not answer. <button type="button" className="font-medium underline" onClick={() => void flow.refetchAllowance()}>Try again</button>
+              </Notice>
+            )}
+            {viaRouter && !preview && chosen.raw !== undefined && !expired && !inactive && !alreadyPaid && (
+              <Notice tone="info" title={needsApproval ? 'Step 1 of 2: approve this payment' : 'Review before you sign'}>
+                {needsApproval
+                  ? `Your wallet will ask you to approve exactly ${amountText} USDC for the Cooket payment contract. Nothing is paid yet, and the contract cannot move more than this amount.`
+                  : `Your wallet will ask you to pay ${amountText} USDC from your wallet to ${request.recipient ? shortAddress(request.recipient) : 'the recipient'} through the Cooket payment contract. This payment is final.`}
               </Notice>
             )}
             {insufficient && <Notice tone="danger" title="Insufficient USDC">Your wallet holds less than this payment on {network.name}.</Notice>}
@@ -224,11 +275,11 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
                 variant="primary"
                 size="lg"
                 full
-                loading={sender.isBusy}
-                disabled={expired || inactive || alreadyPaid || isOwnLink || chosen.raw === undefined || insufficient || !request.recipient}
-                onClick={() => void pay()}
+                loading={busy}
+                disabled={expired || inactive || alreadyPaid || isOwnLink || chosen.raw === undefined || insufficient || !request.recipient || approvalUnknown || flow.approval.phase === 'unconfirmed'}
+                onClick={() => void (needsApproval ? flow.approve() : pay())}
               >
-                {phase === 'signing' ? 'Confirm in wallet…' : payLabel}
+                {primaryLabel}
               </Button>
             )}
 

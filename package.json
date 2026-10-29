@@ -13,7 +13,12 @@
     "check": "bash scripts/check.sh",
     "contracts:build": "forge build",
     "contracts:test": "forge test",
-    "server": "bun run ./server/index.ts"
+    "server": "bun run ./server/index.ts",
+    "test:router": "bun run ./contracts/test-integration/router-verification.ts",
+    "build:api": "esbuild server/handler.ts --bundle --platform=node --format=esm --target=node20 --outfile=api/_handler.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" --log-level=warning",
+    "vercel-build": "vite build && esbuild server/handler.ts --bundle --platform=node --format=esm --target=node20 --outfile=api/_handler.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" --log-level=warning",
+    "test:api": "bun run ./scripts/test-api.ts",
+    "check:storage": "bun run ./scripts/check-storage.ts"
   },
   "dependencies": {
     "@circle-fin/adapter-viem-v2": "^1.19.2",
@@ -51,6 +56,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
+    "esbuild": "0.25.12",
     "oxlint": "^1.80.0",
     "oxlint-tsgolint": "^7.0.2001",
     "postcss": "^8.4.49",

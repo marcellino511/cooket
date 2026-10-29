@@ -29,6 +29,8 @@ bun install
 bun run server   # payment link server on :3001 (the dev server proxies /api to it)
 bun run dev      # app on http://localhost:5173
 bun run check    # lint and typecheck
+bun run contracts:build && bun run contracts:test   # CooketPayRouter build and unit tests (Foundry)
+bun run test:router   # payment verification against a local test chain (needs Foundry's anvil and a prior forge build)
 ```
 
 ### Privy setup
@@ -39,8 +41,33 @@ In the Privy Dashboard for your app, enable the Email, Google, and Wallet login 
 
 - `VITE_PRIVY_APP_ID`: public Privy App ID. Read by the browser app and by the server, which uses it to verify Privy access tokens.
 - `RPC_PROXY_BASE_URL`, `RPC_PROXY_TOKEN`, `RPC_PROXY_CHAINS`: optional, provisioned by Arc Studio. When they cover Arc, the server uses them for RPC; otherwise it uses the public Arc Mainnet RPC.
+- `VITE_COOKET_ROUTER_ADDRESS`: optional, address of the deployed CooketPayRouter contract on Arc Mainnet (a public address). Read by the payment server. When set, new payment links settle through the contract and are verified from its event; when unset, links use direct USDC transfers.
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`: server-only. Durable storage for payment links (Supabase Postgres). Required in production; never give them a `VITE_` prefix and never expose them to the browser. Without them the server uses a local JSON file in development and refuses to run on Vercel.
+- `SUPABASE_ANON_KEY`: optional, used only by `bun run check:storage` to prove the public key cannot read the tables.
+- `ARC_RPC_URL`: optional, a private Arc Mainnet RPC for the server (default: the public RPC from the chain registry).
 - `PORT`: optional, port for the payment server (default 3001).
 - `COOKET_DATA_FILE`: optional, path of the payment server's data file (default `server/data/db.json`).
+
+### Payment contract
+
+`contracts/CooketPayRouter.sol` is an ownerless checkout contract. A payer approves the exact amount, then calls `pay`, which sends USDC straight to the merchant and logs the payment against the link. It holds no funds and has no admin functions. Deploy it yourself with your own wallet and set `VITE_COOKET_ROUTER_ADDRESS` afterwards.
+
+### Production (Vercel)
+
+The app is a Vite static site plus one Vercel Function for the payment link API.
+
+- `api/[...path].mjs` serves everything under `/api/*`. It loads `api/_handler.mjs`, which the `vercel-build` script generates from `server/handler.ts` with esbuild (the file is not committed).
+- The browser calls `/api/...` on the same origin, so no CORS headers are sent or needed.
+- `vercel.json` adds the single-page-app rewrite (everything except `/api` serves `index.html`), a 30 second function limit, and basic security headers.
+- Create the tables once by running `supabase/migrations/0001_payment_links.sql` in the Supabase SQL editor, then `bun run check:storage` to confirm.
+- Set the environment variables above in the Vercel project (Production and Preview), then redeploy. Mark the Supabase service role key as sensitive.
+- Check a deployment: `GET /api/health` should report `"storage":"supabase"`, `"chainId":5042`, and the router address once configured.
+
+### Tests
+
+- `bun run contracts:test`: CooketPayRouter unit tests (Foundry).
+- `bun run test:router`: payment verification against a local test chain.
+- `bun run test:api`: the payment link API and storage layer, offline.
 
 ### Network
 
