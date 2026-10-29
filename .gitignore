@@ -10,4 +10,4 @@ traces.jsonl
 # Foundry build output and vendored dependency (restore with forge install)
 contracts/cache
 contracts/out
-lib/
+/lib/
