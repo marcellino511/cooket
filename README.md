@@ -81,7 +81,8 @@ No new migration is introduced. Supabase must already match `0001_payment_links.
 
 The app is a Vite static site plus one Vercel Function for the payment link API.
 
-- `api/[...path].mjs` serves everything under `/api/*`. It loads `api/_handler.mjs`, which the `vercel-build` script generates from `server/handler.ts` with esbuild (the file is not committed).
+- `api/index.mjs` serves everything under `/api/*`. It loads `api/_handler.mjs`, which the `vercel-build` script generates from `server/handler.ts` with esbuild (the file is not committed).
+- `vercel.json` explicitly rewrites every API path depth to that concrete function, carrying the route in `__cooket_path`. The handler also accepts original URLs. A bracket-named function alone did not route nested `/api/links/<id>` requests in this Vite deployment, even while `/api/health` worked. Platform 404s are treated as service failures; only application JSON `not_found` errors mean a missing link.
 - The browser calls `/api/...` on the same origin, so no CORS headers are sent or needed.
 - `vercel.json` adds the single-page-app rewrite (everything except `/api` serves `index.html`), a 30 second function limit, and basic security headers.
 - Reconcile the database schema and migration history using the sequence below; existing tables and data must be preserved.
@@ -112,6 +113,7 @@ Nonce reservation and link insertion are separate PostgREST requests. If inserti
 - `bun run test:router:checkout`: offline public-deployment configuration, immutable-runtime hash, exact approval and actual checkout-hook call checks with mocked wallet/RPC methods. Requires the compiled artifact. It never signs or sends transactions.
 - `bun run test:router:anvil`: retained contract-to-verifier integration harness in `contracts/test-integration/router-anvil.ts`. It refuses to start without `COOKET_RUN_ANVIL_TRANSACTIONS=1`. **Do not opt in under a no-deployment/no-signing rule**: this harness deploys and signs on an unforked, loopback-only Anvil chain. Its test-only token emits both the canonical system Transfer at 18 decimals and the ERC-20 mirror at 6 decimals. It is an approximation of Arc logs and cannot establish real Arc behavior. This review only bundles the harness; it does not execute it.
 - `bun run test:api`: the payment link API and storage layer, offline.
+- `bun run test:public-checkout`: nested hosting rewrites, zero-USDC merchant creation, public checkout rendering for a funded payer, and mocked payment verification/duplicate registration. Uses disposable local storage and mocked auth/RPC; no real signatures or transactions.
 - `bun run test:checkout-recovery`: offline reload, registration retry/idempotence, RPC outage and positive cancellation-evidence checks for router and legacy checkout.
 - `bun run test:file-store`: development file-store preservation, read-error and concurrent-write tests against disposable local files.
 

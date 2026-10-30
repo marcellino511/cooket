@@ -9,6 +9,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { readFileSync } from 'node:fs'
 import type { LinkPayment } from '../src/shared/links'
 
 const SERVICE_KEY = 'test-service-role-key-not-real'
@@ -133,7 +134,7 @@ process.env.VITE_PRIVY_APP_ID = 'test-app-id'
 delete process.env.VERCEL
 
 const { getStore, StoreConflict, StoreUnavailable, storageStatus } = await import('../server/store')
-const { handle } = await import('../server/app')
+const { default: handle } = await import('../server/handler')
 const store = getStore()
 
 // ---- Store behaviour ----
@@ -211,6 +212,25 @@ const base = `http://127.0.0.1:${API_PORT}`
 const health = await fetch(`${base}/api/health`)
 const healthText = await health.text()
 check('GET /api/health reports storage and router and leaks no secret', health.ok && healthText.includes('"storage":"supabase"') && !healthText.includes(SERVICE_KEY) && healthText.includes('"chainId":5042'))
+const hosting = JSON.parse(readFileSync(new URL('../vercel.json', import.meta.url), 'utf8')) as { rewrites: { source: string; destination: string }[]; functions: Record<string, unknown> }
+const apiRule = hosting.rewrites[0]
+check('hosting explicitly routes every API path depth to a concrete function before the SPA', apiRule.source === '/api/:path*' && apiRule.destination === '/api/index?__cooket_path=:path*' && Boolean(hosting.functions['api/index.mjs']))
+const rewrite = (path: string) => apiRule.destination.replace(':path*', encodeURIComponent(path))
+const active = { ...link, id: 'activeLink0001', inactive: undefined, expiresAt: undefined }
+await store.createLink(active, 'f'.repeat(32))
+const activeResponse = await fetch(`${base}${rewrite(`links/${active.id}`)}`)
+const activeText = await activeResponse.text()
+check('rewritten nested public lookup returns an active non-expiring Supabase link without authentication', activeResponse.status === 200 && activeText.includes('"status":"open"') && activeText.includes(active.id) && activeText.includes(active.router) && !activeText.includes('expiresAt'))
+check('public checkout exposes neither owner identity nor storage credentials or payment history', !activeText.includes('owner') && !activeText.includes('did:privy') && !activeText.includes(SERVICE_KEY) && !activeText.includes('payments'))
+check('public lookup queries payment_links with the exact ID', seenQueries.some((query) => query.table === 'payment_links' && query.params.get('id') === `eq.${active.id}`))
+check('rewritten health still reaches the handler', (await fetch(`${base}${rewrite('health')}`)).ok)
+const missingRewritten = await fetch(`${base}${rewrite('links/noSuchLink0001')}`)
+check('rewritten missing links return application JSON 404', missingRewritten.status === 404 && (await missingRewritten.text()).includes('"code":"not_found"'))
+check('rewritten merchant listing remains authenticated', (await fetch(`${base}${rewrite('links')}`)).status === 401)
+check('rewritten deactivate remains authenticated', (await fetch(`${base}${rewrite(`links/${active.id}/deactivate`)}`, { method: 'POST' })).status === 401)
+check('malformed rewrite paths cannot escape the API', (await fetch(`${base}${rewrite('../health')}`)).status === 404)
+const rewrittenPayment = await fetch(`${base}${rewrite(`links/${active.id}/payments`)}`, { method: 'POST', body: JSON.stringify({ txHash: 'invalid' }) })
+check('rewritten payment registration reaches body validation', rewrittenPayment.status === 400 && (await rewrittenPayment.text()).includes('Transaction hash'))
 const pub = await fetch(`${base}/api/links/${link.id}`)
 const pubText = await pub.text()
 check('GET /api/links/:id is public and hides the owner', pub.ok && pubText.includes(link.recipient) && !pubText.includes('did:privy') && !pubText.includes('ownerDid'))

@@ -45,7 +45,7 @@ export default function Pay() {
             <Skeleton className="h-72 w-full" />
           </div>
         ) : link.isError ? (
-          link.error instanceof ApiError && link.error.status === 404 ? (
+          link.error instanceof ApiError && link.error.status === 404 && link.error.code === 'not_found' ? (
             <Unavailable title="Payment link not found" body="This link does not exist or was removed." />
           ) : (
             <Unavailable title="Could not load this payment request" body="The Cooket payment server is not reachable right now. Try again in a moment." />

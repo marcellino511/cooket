@@ -25,6 +25,7 @@
     "test:checkout-recovery": "bun run ./scripts/test-checkout-recovery.tsx",
     "test:file-store": "bun run ./scripts/test-file-store.ts",
     "test:api": "bun run ./scripts/test-api.ts",
+    "test:public-checkout": "bun run ./scripts/test-public-checkout.tsx",
     "check:storage": "bun run ./scripts/check-storage.ts"
   },
   "dependencies": {
