@@ -52,11 +52,30 @@ In the Privy Dashboard for your app, enable the Email, Google, X (Twitter), and 
 
 ### Payment contract
 
-`contracts/CooketPayRouter.sol` is an ownerless checkout contract. A payer approves the exact amount, then calls `pay`, which sends USDC straight to the merchant and logs the payment against the link. It does not custody payments and has no admin, fee, or withdrawal functions. The constructor fixes a token address; it does not enforce a chain ID or hardcode the token. Any future user-managed Arc Mainnet deployment must use chain **5042** and USDC **`0x3600000000000000000000000000000000000000`** (6 decimals). No contract deployment is established by this repository review.
+`contracts/CooketPayRouter.sol` is an ownerless checkout contract. A payer approves the exact amount, then calls `pay`, which sends USDC straight to the merchant and logs the payment against the link. It does not custody payments and has no admin, fee, or withdrawal functions. The constructor fixes a token address; it does not enforce a chain ID or hardcode the token. Arc Mainnet uses chain **5042** and USDC **`0x3600000000000000000000000000000000000000`** (6 decimals).
 
 The server checks Arc chain identity, pinned runtime code and the `USDC()` getter. It credits a matching `PaymentReceived` only alongside a preceding system-emitter USDC movement from the event payer to the link recipient, in a successful canonical receipt inside the link window. The system movement uses 18 decimals and is converted to the token's 6 decimals; its ERC-20 mirror is never added to it. The transfer's `(tx_hash, log_index)` is the claim key. Router transactions cannot also pay legacy direct-transfer links. Retries preserve older router records that used event indices through an exact `(link_id, tx_hash)` lookup, independently of paginated payment lists. Database uniqueness still enforces `(tx_hash, log_index)` globally; the lookup itself is not the concurrent replay guard. Receipts need one confirmation, consistent with the existing send flow; this does not establish longer-term finality.
 
 Checkout requests an exact-amount allowance and a separate `pay` signature. Existing sufficient allowances can skip approval. Neither approval nor transaction submission marks a link paid: the API must verify and persist the payment. Network switching remains an explicit user action.
+
+### Deployed router checkout setup
+
+The user reports deployment and explorer verification of [CooketPayRouter at `0x1BB1348ab8900D0F04c483fBaeCfd6472D808EF9`](https://explorer.arc.io/address/0x1BB1348ab8900D0F04c483fBaeCfd6472D808EF9). Read-only public RPC inspection observed chain 5042 and runtime matching the local Solidity build byte-for-byte with the immutable Arc USDC address substituted. `USDC()` also returned that token at block **28629631**. The runtime hash is **`0x2c40f831959fd75019c2e52aef0f2c036c8f845c4847eef58dfb03597b384682`**. The explorer page could not be independently retrieved during this review. These checks establish code identity at the observed block, not a successful checkout or production configuration.
+
+The public values are in `config/arc-mainnet-router.env.example`. For local testing, add its three variables to your existing ignored `.env.local` without replacing other settings; if no file exists, copy the example there. Both Bun's payment server and Vite load `.env.local`. Keep `VITE_PRIVY_APP_ID` configured as before. Restart both processes after configuration changes. `ARC_RPC_URL` selects the server RPC only; the frontend already uses the Arc Mainnet registry RPC. If an existing Arc Studio RPC proxy is configured, it takes precedence on the server.
+
+For an approved future production rollout, set `VITE_COOKET_ROUTER_ADDRESS` and server-only `COOKET_ROUTER_CODE_HASH` to those values in the hosting environment. `ARC_RPC_URL=https://rpc.mainnet.arc.io` is optional because it is already the default. Retain the existing Privy and Supabase configuration. A new application build/deployment is required to publish code changes; changing a local file does not configure `app.cooket.fun`. No production settings were changed by this integration.
+
+To test checkout yourself:
+
+1. Start `bun run server` and `bun run dev`, or use an explicitly approved deployment with the same backend configuration. Inspect `/api/health`: expect chain 5042, the router address above, and `routerConfigured: true`. Health alone does not check deployed code or database connectivity.
+2. Sign in as the merchant and create a **new** payment link. Creation checks router runtime and `USDC()` before storing the router with the link. Inspect `GET /api/links/<id>` and confirm its `router` is the deployed address. Existing links without a router remain legacy direct-transfer links; opening them does not convert them.
+3. Open `/pay?id=<id>` with a **different** payer wallet. Explicitly switch to Arc Mainnet if prompted and retain enough USDC for payment plus gas (one shared balance).
+4. For an insufficient allowance, click **Approve** and check the wallet request: token `0x3600000000000000000000000000000000000000`, spender the deployed router, exact checkout amount in 6-decimal units. Wait for confirmation, then click **Pay** separately. A sufficient existing allowance skips approval.
+5. Check the pay request targets the router and calls `pay(keccak256(link ID text), merchant recipient, amountRaw, bytes32(0))` on chain 5042. You decide whether to sign and send these real transactions; automated tests do neither.
+6. Wait for **Payment verified**, then confirm the merchant sees the payment. The browser registers the submitted hash through `POST /api/links/<id>/payments`; the server requires a successful canonical receipt, matching router event and actual system-emitter USDC movement. While verification is pending, use **Check existing payment** and do not pay again. Saved attempts recover after reload.
+
+No new migration is introduced. Supabase must already match `0001_payment_links.sql` plus `0002_payment_links_router.sql`, including nullable `payment_links.router` and replay-protection keys. Inspect actual schema and migration history before any separately authorized migration; never blindly replay SQL on existing data.
 
 ### Production (Vercel)
 
@@ -90,6 +109,7 @@ Nonce reservation and link insertion are separate PostgREST requests. If inserti
 - `bun run test:migrations`: disposable local PostgreSQL tests for fresh, current, and pre-router schemas, data preservation and uniqueness (requires local PostgreSQL binaries).
 - `bun run test:router`: compatibility entry point for the same offline verifier fixtures. It never deploys contracts or signs transactions.
 - `bun run test:router:abi`: reads the compiled router artifact and checks shared ABI selectors, outputs and indexed event fields. Run `bun run contracts:build` first. No RPC or transactions.
+- `bun run test:router:checkout`: offline public-deployment configuration, immutable-runtime hash, exact approval and actual checkout-hook call checks with mocked wallet/RPC methods. Requires the compiled artifact. It never signs or sends transactions.
 - `bun run test:router:anvil`: retained contract-to-verifier integration harness in `contracts/test-integration/router-anvil.ts`. It refuses to start without `COOKET_RUN_ANVIL_TRANSACTIONS=1`. **Do not opt in under a no-deployment/no-signing rule**: this harness deploys and signs on an unforked, loopback-only Anvil chain. Its test-only token emits both the canonical system Transfer at 18 decimals and the ERC-20 mirror at 6 decimals. It is an approximation of Arc logs and cannot establish real Arc behavior. This review only bundles the harness; it does not execute it.
 - `bun run test:api`: the payment link API and storage layer, offline.
 - `bun run test:checkout-recovery`: offline reload, registration retry/idempotence, RPC outage and positive cancellation-evidence checks for router and legacy checkout.

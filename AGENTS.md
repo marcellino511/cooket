@@ -36,7 +36,7 @@ Cooket is a USDC payment app on **Arc Mainnet only** (chain 5042) with Privy sig
 
 ## Deployed contracts
 
-None.
+CooketPayRouter on Arc Mainnet: `0x1BB1348ab8900D0F04c483fBaeCfd6472D808EF9` (deployment and explorer verification reported by the user). Read-only RPC inspection matched its runtime byte-for-byte to the local build with Arc USDC, and `USDC()` returned the expected token, at block 28629631. Public configuration is in `config/arc-mainnet-router.env.example`; production application configuration and real checkout remain unverified.
 
 ## To Run
 
@@ -49,7 +49,7 @@ bun run check
 
 ## CooketPayRouter (payment links)
 - Source: `contracts/CooketPayRouter.sol` (ownerless, no custody, token fixed at deploy). Tests: `contracts/test/CooketPayRouter.t.sol`. Verification test: `bun run test:router`.
-- No deployment verified. Address is configured through `VITE_COOKET_ROUTER_ADDRESS`; verification also requires `COOKET_ROUTER_CODE_HASH`, an independently verified deployed runtime code hash. Never hardcode an address.
+- Address is configured through `VITE_COOKET_ROUTER_ADDRESS`; verification also requires `COOKET_ROUTER_CODE_HASH`, the verified deployed runtime code hash. Use the public deployment configuration above; never hardcode an address in application logic. `test:router:checkout` checks the configured deployment and mocked checkout calls without transactions.
 - Links store the router they were created with. Router links are credited only from a `PaymentReceived` event of that router with the link id hash, recipient and amount, plus a real USDC movement in the same tx (`server/verify.ts`). Links without a router keep the old direct-transfer verification.
 - Checkout for router links is two explicit signatures: exact-amount approve, then pay (`src/chain/useRouterCheckout.ts`). Send USDC (`useSendUsdc`) is untouched.
 - Deploys to mainnet are done by the user with their own wallet; Arc Studio tools do not deploy to mainnet.

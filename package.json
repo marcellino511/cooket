@@ -15,6 +15,7 @@
     "contracts:test": "forge test",
     "server": "bun run ./server/index.ts",
     "test:router:abi": "bun run ./contracts/test-integration/check-abi.ts",
+    "test:router:checkout": "bun run ./scripts/test-router-checkout.tsx",
     "test:router:anvil": "bun run ./contracts/test-integration/router-anvil.ts",
     "test:router": "bun run ./contracts/test-integration/router-verification.ts",
     "build:api": "esbuild server/handler.ts --bundle --platform=node --format=esm --target=node20 --outfile=api/_handler.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" --log-level=warning",
