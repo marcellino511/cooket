@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMemo, useState } from 'react'
 import { useSwitchChain } from 'wagmi'
-import { CheckCircle2, Clock, Loader2, ShieldAlert } from 'lucide-react'
+import { CheckCircle2, ShieldAlert } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Address, CopyButton, ExternalAnchor, Notice } from '@/components/ui/misc'
 import { ConnectWalletButton } from '@/components/layout/ConnectWalletButton'
@@ -12,7 +11,10 @@ import { useSendUsdc } from '@/chain/useSendUsdc'
 import { useRouterCheckout } from '@/chain/useRouterCheckout'
 import { formatDateTime, formatUsdcPrecise, shortAddress } from '@/lib/format'
 import { ARC_NETWORK } from '@/lib/networks'
-import { ApiError, linksApi } from '@/api/links'
+import { txStore } from '@/stores'
+import { checkoutBlocked, isUnresolvedPayment, selectCheckoutTransaction } from '@/chain/transaction-recovery'
+import { retryTransaction } from '@/chain/useTxReconciler'
+import { RecoveryNotice } from './RecoveryNotice'
 import type { PublicLink } from '@/shared/links'
 import { cn } from '@/lib/cn'
 import { useNow } from '@/lib/useNow'
@@ -66,21 +68,26 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
   const viaRouter = Boolean(link.router)
   const flow = useRouterCheckout({ network, router: link.router, linkId: request.id, recipient: request.recipient, amountRaw: chosen.raw, note: request.description || undefined })
   const payState = viaRouter ? flow.pay : sender.state
-  const { phase, hash } = payState
+  const records = txStore.use()
+  const recovery = preview ? undefined : selectCheckoutTransaction(records, request.id, request.recipient, link.mode === 'fixed', payState.hash)
+  const [checking, setChecking] = useState(false)
+  const phase = recovery?.failureEvidence && recovery.status === 'failed' ? 'reverted' : payState.phase
+  const hash = recovery?.verifiedPaymentHash ?? recovery?.replacementHash ?? recovery?.hash ?? payState.hash
   const payError = payState.error
   const busy = viaRouter ? flow.busy : sender.isBusy
   const approving = flow.approval.phase === 'signing' || flow.approval.phase === 'confirming'
-  const done = phase === 'confirmed'
-  const verify = useMutation({ mutationFn: (txHash: string) => linksApi.verifyPayment(request.id, txHash) })
-  const verifyMutate = verify.mutate
-  const isIdle = verify.isIdle
-  useEffect(() => {
-    if (!preview && done && hash && isIdle) verifyMutate(hash)
-  }, [preview, done, hash, isIdle, verifyMutate])
-  const waiting = phase === 'confirming' || phase === 'unconfirmed'
+  const done = Boolean(recovery?.linkVerifiedAt)
+  const unresolved = Boolean(recovery && isUnresolvedPayment(recovery))
+  const retry = async () => {
+    if (!recovery || checking) return
+    setChecking(true)
+    try { await retryTransaction(recovery) } catch { /* Keep the saved attempt blocked on unexpected errors. */ }
+    finally { setChecking(false) }
+  }
+  const blocked = () => checkoutBlocked(txStore.get(), request.id, request.recipient, link.mode === 'fixed')
 
   const pay = async () => {
-    if (!request.recipient || chosen.raw === undefined || expired || inactive || alreadyPaid) return
+    if (!request.recipient || chosen.raw === undefined || expired || inactive || alreadyPaid || blocked()) return
     if (request.expiresAt && Date.now() > request.expiresAt) return
     if (viaRouter) {
       await flow.submit()
@@ -126,7 +133,7 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
                   autoComplete="off"
                   placeholder="0.00"
                   value={amountInput}
-                  disabled={done || waiting}
+                  disabled={done || unresolved || busy}
                   onChange={(e) => setAmountInput(sanitizeAmountInput(e.target.value, network.usdcDecimals))}
                   aria-invalid={chosen.error ? true : undefined}
                   className="num min-w-0 flex-1 bg-transparent text-3xl font-semibold tracking-tight text-ink outline-none placeholder:text-slate-300"
@@ -192,41 +199,14 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
           <Button variant="primary" size="lg" full disabled>
             Pay (preview only)
           </Button>
+        ) : unresolved && recovery ? (
+          <RecoveryNotice tx={recovery} checking={checking} onRetry={() => void retry()} />
         ) : done && hash ? (
           <div className="rounded-xl bg-success-50 p-4 text-center" aria-live="polite">
             <CheckCircle2 className="mx-auto size-8 text-success" aria-hidden />
-            <p className="mt-2 font-semibold text-ink">Payment confirmed on {network.name}</p>
-            <p className="mt-1 text-sm text-muted" aria-live="polite">
-              {verify.isPending || verify.isIdle
-                ? 'Registering your payment with the merchant…'
-                : verify.isSuccess
-                  ? 'The merchant’s payment link verified this payment onchain.'
-                  : `Your payment is confirmed, but the merchant link could not verify it yet: ${verify.error instanceof ApiError ? verify.error.message : 'unknown error'}`}
-            </p>
-            {verify.isError && (
-              <Button size="sm" className="mt-3" onClick={() => verify.mutate(hash)}>
-                Try verification again
-              </Button>
-            )}
-            <ExternalAnchor href={buildTxExplorerUrl(network.chainId, hash)} className="mt-3 text-sm">
-              View transaction
-            </ExternalAnchor>
-          </div>
-        ) : waiting && hash ? (
-          <div className="rounded-xl bg-warning-50 p-4 text-center" aria-live="polite">
-            {phase === 'confirming' ? <Loader2 className="mx-auto size-7 animate-spin text-warning" aria-hidden /> : <Clock className="mx-auto size-7 text-warning" aria-hidden />}
-            <p className="mt-2 font-semibold text-ink">{phase === 'confirming' ? 'Waiting for confirmation' : 'Still pending'}</p>
-            <p className="mt-1 text-sm text-muted">Your payment is submitted but not confirmed yet. Do not pay again.</p>
-            {phase === 'unconfirmed' && (
-              <Button size="sm" className="mt-3" loading={verify.isPending} onClick={() => verify.mutate(hash)}>
-                Check payment status
-              </Button>
-            )}
-            {phase === 'unconfirmed' && verify.isSuccess && <p className="mt-2 text-sm text-success">Verified onchain.</p>}
-            {phase === 'unconfirmed' && verify.isError && <p className="mt-2 text-sm text-muted">{verify.error instanceof ApiError ? verify.error.message : 'Not confirmed yet.'}</p>}
-            <ExternalAnchor href={buildTxExplorerUrl(network.chainId, hash)} className="mt-3 text-sm">
-              View transaction
-            </ExternalAnchor>
+            <p className="mt-2 font-semibold text-ink">Payment verified on {network.name}</p>
+            <p className="mt-1 text-sm text-muted">The merchant’s payment link verified and recorded this payment onchain.</p>
+            <ExternalAnchor href={buildTxExplorerUrl(network.chainId, hash)} className="mt-3 text-sm">View transaction</ExternalAnchor>
           </div>
         ) : (
           <div className="space-y-3">
@@ -234,6 +214,7 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
             {inactive && <Notice tone="danger" title="This payment link was turned off">The merchant deactivated it. Ask them for a new link.</Notice>}
             {alreadyPaid && <Notice tone="success" title="This link has already been paid">A payment was verified for this fixed-amount link.</Notice>}
             {isOwnLink && <Notice tone="warning" title="This is your own link">You cannot pay yourself.</Notice>}
+            {recovery?.failureEvidence && recovery.failureReason && <Notice tone="warning" title="Previous payment did not complete">{recovery.failureReason}</Notice>}
             {(phase === 'failed' || phase === 'reverted') && payError && (
               <Notice tone="danger" title={payError.title}>
                 {payError.detail} {payError.recovery}
@@ -276,8 +257,8 @@ export function CheckoutCard({ link, mode }: { link: CheckoutLink; mode: 'live' 
                 size="lg"
                 full
                 loading={busy}
-                disabled={expired || inactive || alreadyPaid || isOwnLink || chosen.raw === undefined || insufficient || !request.recipient || approvalUnknown || flow.approval.phase === 'unconfirmed'}
-                onClick={() => void (needsApproval ? flow.approve() : pay())}
+                disabled={unresolved || expired || inactive || alreadyPaid || isOwnLink || chosen.raw === undefined || insufficient || !request.recipient || approvalUnknown || flow.approval.phase === 'unconfirmed'}
+                onClick={() => { if (!blocked()) void (needsApproval ? flow.approve() : pay()) }}
               >
                 {primaryLabel}
               </Button>

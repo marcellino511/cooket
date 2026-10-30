@@ -9,12 +9,11 @@ import {
   buildCreateMessage,
   deriveStatus,
   type CreateLinkInput,
-  type LinkMode,
   type MerchantLink,
   type PublicLink,
 } from '../src/shared/links'
 import { authenticate } from './auth'
-import { CHAIN_ID, PRIVY_APP_ID, ROUTER_ADDRESS, USDC_ADDRESS, USDC_DECIMALS } from './config'
+import { CHAIN_ID, PRIVY_APP_ID, ROUTER_ADDRESS, ROUTER_CONFIG_VALID, USDC_ADDRESS, USDC_DECIMALS } from './config'
 import type { DbLink } from './db'
 import { getStore, storageStatus } from './store'
 import { StorageNotConfigured, StoreConflict, StoreUnavailable } from './store-types'
@@ -134,26 +133,27 @@ async function createLink(req: IncomingMessage, did: string): Promise<PublicLink
   }
 
   const issuedAt = body.issuedAt
-  if (typeof issuedAt !== 'number' || Math.abs(now - issuedAt) > SIGNATURE_MAX_AGE_MS) throw new HttpError(400, 'The signature request is stale. Try again.', 'stale_signature')
+  if (typeof issuedAt !== 'number' || !Number.isSafeInteger(issuedAt) || Math.abs(now - issuedAt) > SIGNATURE_MAX_AGE_MS) throw new HttpError(400, 'The signature request is stale. Try again.', 'stale_signature')
   const nonce = str(body.nonce)
   if (!/^[0-9a-f]{16,64}$/.test(nonce)) throw new HttpError(400, 'Nonce is invalid.')
   const signature = str(body.signature)
   if (!isHex(signature)) throw new HttpError(400, 'Signature is invalid.')
 
   // A configured router must be the real CooketPayRouter for Arc USDC before any link binds to it.
+  if (!ROUTER_CONFIG_VALID) throw new HttpError(503, 'Payment contract configuration is invalid.', 'router_not_configured')
   if (ROUTER_ADDRESS) {
     const routerOk = await routerIsValid(ROUTER_ADDRESS).catch(() => null)
     if (routerOk === null) throw new HttpError(503, 'The Arc Mainnet RPC could not be verified. Try again shortly.', 'rpc_unavailable')
     if (!routerOk) throw new HttpError(503, 'The configured payment contract is not a valid CooketPayRouter for Arc USDC.', 'router_invalid')
   }
 
-  const input: CreateLinkInput = { recipient, description, merchant, mode: mode as LinkMode, amount, expiresAt, issuedAt, nonce, router: ROUTER_ADDRESS }
+  const input: CreateLinkInput = { recipient, description, merchant, mode: mode, amount, expiresAt, issuedAt, nonce, router: ROUTER_ADDRESS }
   const message = buildCreateMessage(input, USDC_ADDRESS)
   const valid = await client.verifyMessage({ address: recipient, message, signature }).catch(() => false)
   if (!valid) throw new HttpError(401, 'The signature does not prove control of the recipient wallet.', 'bad_signature')
 
   const id = randomBytes(8).toString('base64url')
-  const link: DbLink = { id, ownerDid: did, recipient, description, merchant, mode: mode as LinkMode, amountRaw: amountRaw?.toString(), expiresAt, createdAt: now, router: ROUTER_ADDRESS }
+  const link: DbLink = { id, ownerDid: did, recipient, description, merchant, mode: mode, amountRaw: amountRaw?.toString(), expiresAt, createdAt: now, router: ROUTER_ADDRESS }
   try {
     await getStore().createLink(link, nonce)
   } catch (error) {
@@ -170,7 +170,10 @@ async function route(req: IncomingMessage, res: ServerResponse) {
   const parts = pathname.split('/').filter(Boolean)
   const method = req.method ?? 'GET'
 
-  if (pathname === '/health') return send(res, 200, { ok: true, chainId: CHAIN_ID, auth: Boolean(PRIVY_APP_ID), router: ROUTER_ADDRESS ?? null, storage: storageStatus() })
+  if (pathname === '/health') {
+    const ok = storageStatus() !== 'not_configured' && ROUTER_CONFIG_VALID
+    return send(res, ok ? 200 : 503, { ok, chainId: CHAIN_ID, auth: Boolean(PRIVY_APP_ID), router: ROUTER_ADDRESS ?? null, routerConfigured: ROUTER_CONFIG_VALID, storage: storageStatus() })
+  }
 
   if (parts[0] !== 'links') throw new HttpError(404, 'Not found.', 'not_found')
 
@@ -225,11 +228,14 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     if (link.inactive) throw new HttpError(409, 'This payment link was turned off by the merchant.', 'inactive')
 
     const result = await verifyPayment(link, txHash as `0x${string}`)
-    if (!result.ok) throw new HttpError(result.code === 'rpc_unavailable' ? 503 : 422, result.message, result.code)
+    if (!result.ok) throw new HttpError(['rpc_unavailable', 'router_not_configured', 'router_invalid'].includes(result.code) ? 503 : 422, result.message, result.code)
 
     let recorded
     try {
-      recorded = await getStore().recordPayment(id, result.payment)
+      // Older router records used the PaymentReceived index. Preserve their idempotence when
+      // verification now identifies the underlying system Transfer instead.
+      const existing = link.router ? await getStore().findPayment(id, txHash) : null
+      recorded = existing ?? await getStore().recordPayment(id, result.payment)
     } catch (error) {
       if (error instanceof StoreConflict) throw new HttpError(409, 'That transfer already counts toward another payment link.', 'already_claimed')
       throw error

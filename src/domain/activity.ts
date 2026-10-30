@@ -14,13 +14,13 @@ interface BuildInput {
 
 export function buildActivity({ account, local, transfers, contacts, linkByHash }: BuildInput): ActivityItem[] {
   const names = new Map(contacts.map((c) => [c.address.toLowerCase(), c.name]))
-  const localHashes = new Set(local.map((t) => t.hash.toLowerCase()))
+  const localHashes = new Set(local.flatMap((t) => [t.hash, t.verifiedPaymentHash ?? t.hash]).map((hash) => hash.toLowerCase()))
   const items: ActivityItem[] = []
 
   for (const tx of local) {
     items.push({
       id: tx.hash,
-      hash: tx.hash,
+      hash: tx.verifiedPaymentHash ?? tx.hash,
       chainId: tx.chainId,
       direction: 'sent',
       amount: BigInt(tx.amountRaw),

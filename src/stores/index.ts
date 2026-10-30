@@ -1,5 +1,6 @@
 import { createStore, randomId } from '@/lib/store'
 import type { AppNotification, Contact, LocalTx } from '@/domain/types'
+import { isUnresolvedPayment } from '@/chain/transaction-recovery'
 
 export type DisplayCurrency = 'USD' | 'EUR' | 'GBP' | 'CAD' | 'AUD' | 'CHF' | 'JPY'
 export const DISPLAY_CURRENCIES: readonly DisplayCurrency[] = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'CHF', 'JPY']
@@ -42,9 +43,20 @@ export function upsertLocalTx(tx: LocalTx) {
   const key = tx.from.toLowerCase()
   txStore.set((prev) => {
     const list = prev[key] ?? []
-    const exists = list.some((t) => t.hash === tx.hash)
-    const next = exists ? list.map((t) => (t.hash === tx.hash ? { ...t, ...tx } : t)) : [tx, ...list]
-    return { ...prev, [key]: next.slice(0, 200) }
+    const exists = list.some((t) => t.hash.toLowerCase() === tx.hash.toLowerCase())
+    const next = exists ? list.map((t) => {
+      if (t.hash.toLowerCase() !== tx.hash.toLowerCase()) return t
+      const merged = { ...t, ...tx }
+      // A slower receipt waiter must not downgrade an acknowledged merchant payment.
+      return t.linkVerifiedAt ? { ...merged, status: 'completed' as const, linkVerifiedAt: t.linkVerifiedAt,
+        verifiedPaymentHash: t.verifiedPaymentHash, failureEvidence: undefined, failureReason: undefined, recoveryMessage: undefined } : merged
+    }) : [tx, ...list]
+    // History limits must never evict a payment that still needs merchant verification.
+    // Keep a newly acknowledged old payment long enough to survive cache refresh/reload.
+    const updated = next.find((row) => row.hash.toLowerCase() === tx.hash.toLowerCase())
+    const ordered = tx.kind === 'payment-link' && updated ? [updated, ...next.filter((row) => row !== updated)] : next
+    const retained = ordered.slice(0, 200)
+    return { ...prev, [key]: [...retained, ...ordered.slice(200).filter(isUnresolvedPayment)] }
   })
 }
 

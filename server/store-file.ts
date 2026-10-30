@@ -24,6 +24,10 @@ export class FileStore implements Store {
     )
   }
 
+  findPayment(linkId: string, txHash: string): Promise<LinkPayment | null> {
+    return read((db) => db.payments[linkId]?.find((payment) => payment.txHash.toLowerCase() === txHash.toLowerCase()) ?? null)
+  }
+
   createLink(link: DbLink, nonce: string): Promise<void> {
     return mutate((db) => {
       if (db.nonces[nonce]) throw new StoreConflict('replayed')

@@ -15,7 +15,7 @@ function Unavailable({ title, body }: { title: string; body: string }) {
       </div>
       <h1 className="mt-4 text-xl font-semibold text-ink">{title}</h1>
       <p className="mt-2 text-sm text-muted">{body}</p>
-      <p className="mt-1 text-sm text-muted">No payment was made.</p>
+      <p className="mt-1 text-sm text-muted">If you already submitted a payment, check its existing transaction before paying again.</p>
       <Button className="mt-6" onClick={() => navigate('/')}>
         Open Cooket
       </Button>

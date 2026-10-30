@@ -31,7 +31,7 @@ Cooket is a USDC payment app on **Arc Mainnet only** (chain 5042) with Privy sig
 - No demo data. Without a Privy session the app shows sign-in only.
 - Completed = receipt success with 1 confirmation (`CONFIRMATIONS`). The reconciler resolves pending records after reloads.
 - Payment links live on the server. Creation needs a Privy session and a signature from the recipient wallet. A payment is recorded only if the tx succeeded on 5042, has a USDC system Transfer to the recipient, matches the fixed amount, and falls inside the link window. Each transfer log can count once.
-- The server stores data in `server/data/db.json` (atomic writes). Replace with a real database for production.
+- Production payment-link storage is Supabase Postgres via server-only PostgREST. Local development can use `server/data/db.json` (atomic writes); Vercel fails closed without Supabase configuration.
 - Never switch the wallet network silently: switching is always an explicit button.
 
 ## Deployed contracts
@@ -49,13 +49,13 @@ bun run check
 
 ## CooketPayRouter (payment links)
 - Source: `contracts/CooketPayRouter.sol` (ownerless, no custody, token fixed at deploy). Tests: `contracts/test/CooketPayRouter.t.sol`. Verification test: `bun run test:router`.
-- NOT deployed yet. Deployed address is configured through `VITE_COOKET_ROUTER_ADDRESS` (read by `server/config.ts`). Never hardcode it.
+- No deployment verified. Address is configured through `VITE_COOKET_ROUTER_ADDRESS`; verification also requires `COOKET_ROUTER_CODE_HASH`, an independently verified deployed runtime code hash. Never hardcode an address.
 - Links store the router they were created with. Router links are credited only from a `PaymentReceived` event of that router with the link id hash, recipient and amount, plus a real USDC movement in the same tx (`server/verify.ts`). Links without a router keep the old direct-transfer verification.
 - Checkout for router links is two explicit signatures: exact-amount approve, then pay (`src/chain/useRouterCheckout.ts`). Send USDC (`useSendUsdc`) is untouched.
 - Deploys to mainnet are done by the user with their own wallet; Arc Studio tools do not deploy to mainnet.
 
 ## Payment link API hosting
 - Production: Vercel Function `api/[...path].mjs` (same origin as the app, no CORS). `api/_handler.mjs` is generated at build by `vercel-build` (esbuild bundles `server/handler.ts`); do not commit it.
-- Storage: Supabase via PostgREST with the service role key, server-only (`server/store-supabase.ts`). Schema and RLS: `supabase/migrations/0001_payment_links.sql`. On Vercel without Supabase variables the API returns 503 instead of using the disk.
+- Storage: Supabase via PostgREST with the service role key, server-only (`server/store-supabase.ts`). Baseline schema and RLS: `supabase/migrations/0001_payment_links.sql`; forward compatibility for a missing router column: `0002_payment_links_router.sql`. Inspect existing schema and migration history before applying SQL. On Vercel without Supabase variables the API returns 503 instead of using the disk.
 - Local dev still uses the JSON file store. The Vite dev server proxies `/api` to `bun run server`.
-- Tests: `bun run test:api`, `bun run test:router`, `bun run check:storage` (needs real Supabase credentials).
+- Tests: `bun run test:api`, `bun run test:verify`, `bun run test:migrations`. `bun run check:storage` is a read-only external smoke check (needs Supabase credentials). `test:router` runs the same offline fixtures as `test:verify`; no deployments, keys, signing or transactions. `test:router:abi` checks compiled ABI parity without RPC. The retained `test:router:anvil` harness requires explicit `COOKET_RUN_ANVIL_TRANSACTIONS=1`; never opt in under no-deployment/no-signing instructions.

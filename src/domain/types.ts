@@ -21,6 +21,13 @@ export interface LocalTx {
   confirmedAt?: number
   blockNumber?: string
   failureReason?: string
+  /** Recovery metadata. Absence of a receipt or an RPC error is never failure evidence. */
+  nonce?: number
+  replacementHash?: Hex
+  failureEvidence?: 'reverted' | 'cancelled'
+  linkVerifiedAt?: number
+  verifiedPaymentHash?: Hex
+  recoveryMessage?: string
 }
 
 /** A USDC Transfer event read from the chain or the explorer. */

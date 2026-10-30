@@ -4,13 +4,14 @@ import { useReadContract, useWriteContract } from 'wagmi'
 import { erc20Abi, zeroHash } from 'viem'
 import { parseTxError, type ParsedTxError } from '@/lib/errors'
 import { formatUsdc } from '@/lib/format'
-import { pushNotification, settingsStore, upsertLocalTx } from '@/stores'
+import { pushNotification, settingsStore, txStore, upsertLocalTx } from '@/stores'
 import { ARC_MIN_MAX_FEE_PER_GAS, type Network } from '@/lib/networks'
 import { ROUTER_ABI, linkIdToBytes32 } from '@/shared/router'
 import type { Address, Hex } from '@/domain/types'
 import { CONFIRMATIONS, clientFor } from './client'
 import { useSession } from './useSession'
 import type { SendPhase } from './useSendUsdc'
+import { checkoutBlocked } from './transaction-recovery'
 
 const WAIT_MS = 90_000
 
@@ -75,7 +76,7 @@ export function useRouterCheckout({ network, router, linkId, recipient, amountRa
   const needsApproval = allowanceRaw === undefined || amountRaw === undefined ? undefined : allowanceRaw < amountRaw
 
   const approve = useCallback(async () => {
-    if (!address || !router || amountRaw === undefined || inFlight.current) return
+    if (!address || !router || amountRaw === undefined || inFlight.current || checkoutBlocked(txStore.get(), linkId, recipient, false)) return
     inFlight.current = true
     setApproval({ phase: 'signing' })
     let hash: Hex
@@ -112,10 +113,10 @@ export function useRouterCheckout({ network, router, linkId, recipient, amountRa
     } finally {
       inFlight.current = false
     }
-  }, [address, allowance, amountRaw, network, router, writeContractAsync])
+  }, [address, allowance, amountRaw, network, router, writeContractAsync, linkId, recipient])
 
   const submit = useCallback(async () => {
-    if (!address || !router || !recipient || amountRaw === undefined || inFlight.current) return
+    if (!address || !router || !recipient || amountRaw === undefined || inFlight.current || checkoutBlocked(txStore.get(), linkId, recipient, false)) return
     inFlight.current = true
     const notifyOutgoing = settingsStore.get().notifyOutgoing
     setPay({ phase: 'signing' })
@@ -151,7 +152,19 @@ export function useRouterCheckout({ network, router, linkId, recipient, amountRa
     setPay({ phase: 'confirming', hash })
 
     try {
-      const receipt = await clientFor(network.chainId).waitForTransactionReceipt({ hash, confirmations: CONFIRMATIONS, timeout: WAIT_MS })
+      const receipt = await clientFor(network.chainId).waitForTransactionReceipt({
+        hash, confirmations: CONFIRMATIONS, timeout: WAIT_MS,
+        onReplaced: ({ replacedTransaction, transaction }) => {
+          if (replacedTransaction.from.toLowerCase() === address.toLowerCase() && replacedTransaction.hash.toLowerCase() === hash.toLowerCase()) {
+            upsertLocalTx({ ...base, status: 'pending', nonce: replacedTransaction.nonce, replacementHash: transaction.hash })
+          }
+        },
+      })
+      if (receipt.transactionHash.toLowerCase() !== hash.toLowerCase()) {
+        upsertLocalTx({ ...base, status: 'pending', replacementHash: receipt.transactionHash })
+        setPay({ phase: 'unconfirmed', hash })
+        return
+      }
       const amountText = `${formatUsdc(amountRaw)} USDC`
       if (receipt.status === 'success') {
         upsertLocalTx({ ...base, status: 'completed', confirmedAt: Date.now(), blockNumber: receipt.blockNumber.toString() })

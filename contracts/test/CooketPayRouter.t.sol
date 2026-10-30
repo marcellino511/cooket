@@ -73,6 +73,18 @@ contract CooketPayRouterTest is Test {
         assertEq(usdc.allowance(payer, address(router)), 60e6);
     }
 
+    function test_Pay_ExactAllowanceConsumedAndCannotBeReused() public {
+        vm.startPrank(payer);
+        usdc.approve(address(router), 100e6);
+        router.pay(LINK, merchant, 100e6, REF);
+        assertEq(usdc.allowance(payer, address(router)), 0);
+        vm.expectRevert();
+        router.pay(LINK, merchant, 1, REF);
+        vm.stopPrank();
+        assertEq(usdc.balanceOf(merchant), 100e6);
+        assertEq(usdc.balanceOf(address(router)), 0);
+    }
+
     function test_Pay_RecipientEqualsPayerAllowedAndEmits() public {
         uint256 amount = 10e6;
         vm.expectEmit(true, true, true, true, address(router));

@@ -27,6 +27,11 @@ export const DATA_FILE = process.env.COOKET_DATA_FILE ?? new URL('./data/db.json
  * When unset, new links use direct USDC transfers exactly as before the router existed.
  */
 export const ROUTER_ADDRESS = parseRouterAddress(process.env.VITE_COOKET_ROUTER_ADDRESS)
+/** Independently verified keccak256 of deployed runtime code (including the immutable USDC address). */
+export const ROUTER_CODE_HASH = /^0x[0-9a-fA-F]{64}$/.test(process.env.COOKET_ROUTER_CODE_HASH ?? '')
+  ? process.env.COOKET_ROUTER_CODE_HASH!.toLowerCase()
+  : undefined
+export const ROUTER_CONFIG_VALID = !process.env.VITE_COOKET_ROUTER_ADDRESS?.trim() || Boolean(ROUTER_ADDRESS && ROUTER_CODE_HASH)
 
 /** Durable storage for payment links. Server-only secrets: never give these a VITE_ prefix. */
 export const SUPABASE_URL = (process.env.SUPABASE_URL ?? '').replace(/\/+$/, '')

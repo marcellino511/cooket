@@ -1,9 +1,9 @@
-import { BaseError, HttpRequestError, TimeoutError, createPublicClient, getAddress, http, parseEventLogs, type Log } from 'viem'
+import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, keccak256, parseEventLogs, toEventSelector, type Log } from 'viem'
 import { arc } from 'viem/chains'
 import { ARC_SYSTEM_EMITTER, type LinkPayment } from '../src/shared/links'
 import { ROUTER_ABI, linkIdToBytes32 } from '../src/shared/router'
 import type { DbLink } from './db'
-import { CHAIN_ID, GAS_DECIMALS, RPC_URL, USDC_ADDRESS, USDC_DECIMALS } from './config'
+import { CHAIN_ID, GAS_DECIMALS, RPC_URL, ROUTER_CODE_HASH, USDC_ADDRESS, USDC_DECIMALS } from './config'
 
 export const client = createPublicClient({ chain: arc, transport: http(RPC_URL) })
 
@@ -11,67 +11,67 @@ const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 /** Native logs carry 18 decimals; the ERC-20 view carries 6. */
 const SCALE = 10n ** BigInt(GAS_DECIMALS - USDC_DECIMALS)
 
-let chainChecked: Promise<boolean> | null = null
-function rpcIsArcMainnet(): Promise<boolean> {
-  chainChecked ??= client
-    .getChainId()
-    .then((id) => id === CHAIN_ID)
-    .catch(() => {
-      chainChecked = null
-      return false
-    })
-  return chainChecked
+async function rpcIsArcMainnet(): Promise<boolean> {
+  return client.getChainId().then((id) => id === CHAIN_ID).catch(() => false)
 }
 
 export type VerifyResult = { ok: true; payment: LinkPayment } | { ok: false; code: string; message: string }
 
 const fail = (code: string, message: string): VerifyResult => ({ ok: false, code, message })
 
-const routerChecks = new Map<string, Promise<boolean>>()
-/**
- * A router address only counts if it has code on Arc Mainnet and reports the canonical USDC as its token.
- * This catches a mistyped or wrong-chain address before any link is created or any payment is credited.
- */
-export function routerIsValid(router: `0x${string}`): Promise<boolean> {
-  const key = router.toLowerCase()
-  let check = routerChecks.get(key)
-  if (!check) {
-    check = (async () => {
-      if (!(await rpcIsArcMainnet())) throw new Error('rpc')
-      const code = await client.getCode({ address: router })
-      if (!code || code === '0x') return false
-      try {
-        const token = await client.readContract({ address: router, abi: ROUTER_ABI, functionName: 'USDC' })
-        return token.toLowerCase() === USDC_ADDRESS.toLowerCase()
-      } catch (error) {
-        // Network trouble is retryable; a contract that has no USDC() getter (or reverts) is simply not a router.
-        if (error instanceof BaseError && error.walk((e) => e instanceof HttpRequestError || e instanceof TimeoutError)) throw error
-        return false
-      }
-    })().catch((error: unknown) => {
-      routerChecks.delete(key) // do not cache RPC failures
-      throw error
-    })
-    routerChecks.set(key, check)
-  }
-  return check
+/** Getter checks alone do not establish identity: a fabricated router can return any token address. */
+export async function routerIsValid(router: `0x${string}`): Promise<boolean> {
+  if (!ROUTER_CODE_HASH) return false
+  if (!(await rpcIsArcMainnet())) throw new Error('rpc')
+  const code = await client.getCode({ address: router })
+  if (!code || code === '0x' || keccak256(code) !== ROUTER_CODE_HASH) return false
+  // With the pinned immutable runtime, a getter read failure is retryable provider trouble.
+  const token = await client.readContract({ address: router, abi: ROUTER_ABI, functionName: 'USDC' })
+  return typeof token === 'string' && token.toLowerCase() === USDC_ADDRESS.toLowerCase()
 }
 
-/** True when `logs` hold a real USDC movement of exactly `amount` from payer to recipient, emitted before `beforeLogIndex`. */
-function hasUsdcMovement(logs: readonly Log[], payer: string, recipient: string, amount: bigint, beforeLogIndex: number): boolean {
-  return logs.some((log) => {
-    if (log.logIndex === null || log.logIndex >= beforeLogIndex) return false
-    const topics = log.topics
-    if (topics.length !== 3 || topics[0] !== TRANSFER_TOPIC || !topics[1] || !topics[2]) return false
-    if (`0x${topics[1].slice(26)}`.toLowerCase() !== payer.toLowerCase()) return false
-    if (`0x${topics[2].slice(26)}`.toLowerCase() !== recipient.toLowerCase()) return false
-    const value = BigInt(log.data)
-    const emitter = log.address.toLowerCase()
-    // The USDC ERC-20 reports 6 decimals; the Arc system emitter reports the same movement at 18.
-    if (emitter === USDC_ADDRESS.toLowerCase()) return value === amount
-    if (emitter === ARC_SYSTEM_EMITTER.toLowerCase()) return value === amount * SCALE
-    return false
-  })
+/** Only Arc's canonical 18-decimal system emitter establishes a movement; never count its ERC-20 mirror. */
+function movement(log: Log): { from: `0x${string}`; to: string; value: bigint; logIndex: number } | null {
+  if (log.address.toLowerCase() !== ARC_SYSTEM_EMITTER.toLowerCase() || log.removed ||
+      !Number.isSafeInteger(log.logIndex) || log.logIndex === null || log.logIndex < 0) return null
+  if (log.topics.length !== 3 || log.topics[0] !== TRANSFER_TOPIC ||
+      !/^0x0{24}[0-9a-fA-F]{40}$/.test(log.topics[1] ?? '') ||
+      !/^0x0{24}[0-9a-fA-F]{40}$/.test(log.topics[2] ?? '') ||
+      !/^0x[0-9a-fA-F]{64}$/.test(log.data)) return null
+  const from = getAddress(`0x${log.topics[1].slice(26)}`)
+  const to = `0x${log.topics[2].slice(26)}`
+  if (/^0x0{40}$/i.test(from) || /^0x0{40}$/i.test(to)) return null
+  return { from, to, value: BigInt(log.data), logIndex: log.logIndex }
+}
+
+async function readReceipt(txHash: `0x${string}`) {
+  const receipt = await client.getTransactionReceipt({ hash: txHash }).catch((error: unknown) => error instanceof TransactionReceiptNotFoundError ? null : undefined)
+  if (receipt === undefined) return { error: fail('rpc_unavailable', 'Could not read the transaction receipt. Try again shortly.') } as const
+  if (!receipt) return { error: fail('not_found', 'That transaction is not on Arc Mainnet yet. Wait for it to confirm and try again.') } as const
+  if (receipt.status === 'reverted') return { error: fail('reverted', 'That transaction failed onchain, so no payment was made.') } as const
+  if (receipt.status !== 'success' || typeof receipt.blockNumber !== 'bigint' || receipt.blockNumber < 0n) {
+    return { error: fail('invalid_receipt', 'The transaction receipt is malformed.') } as const
+  }
+  const block = await client.getBlock({ blockNumber: receipt.blockNumber }).catch(() => null)
+  if (!block) return { error: fail('rpc_unavailable', 'Could not read the transaction block. Try again shortly.') } as const
+  // A mined canonical receipt provides the required one confirmation. Reject stale/reorged or mixed receipts.
+  if (!Array.isArray(receipt.logs)) return { error: fail('invalid_receipt', 'The transaction receipt has no logs.') } as const
+  if (receipt.logs.some((log) => !log || typeof log.address !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(log.address) ||
+      !Array.isArray(log.topics) || !log.topics.every((topic) => typeof topic === 'string' && /^0x[0-9a-fA-F]{64}$/.test(topic)) ||
+      typeof log.data !== 'string' || typeof log.transactionHash !== 'string')) {
+    return { error: fail('invalid_receipt', 'The transaction receipt has malformed logs.') } as const
+  }
+  const indices = receipt.logs.map((log) => log.logIndex)
+  if (typeof receipt.transactionHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(receipt.blockHash ?? '') ||
+      typeof block.timestamp !== 'bigint' || !Number.isSafeInteger(Number(block.timestamp) * 1000) ||
+      receipt.transactionHash.toLowerCase() !== txHash.toLowerCase() || block.hash !== receipt.blockHash ||
+      block.number !== receipt.blockNumber || new Set(indices).size !== indices.length ||
+      receipt.logs.some((log) => log.removed || log.blockHash !== receipt.blockHash ||
+        log.blockNumber !== receipt.blockNumber || log.transactionHash?.toLowerCase() !== txHash.toLowerCase() ||
+        log.logIndex === null || !Number.isSafeInteger(log.logIndex) || log.logIndex < 0)) {
+    return { error: fail('invalid_receipt', 'The transaction receipt is inconsistent. Try again shortly.') } as const
+  }
+  return { receipt, paidAt: Number(block.timestamp) * 1000 } as const
 }
 
 /**
@@ -79,17 +79,14 @@ function hasUsdcMovement(logs: readonly Log[], payer: string, recipient: string,
  * carrying THIS link's id and recipient, backed by a real USDC movement in the same successful transaction.
  */
 async function verifyRouterPayment(link: DbLink & { router: `0x${string}` }, txHash: `0x${string}`): Promise<VerifyResult> {
+  if (!ROUTER_CODE_HASH) return fail('router_not_configured', 'The payment contract runtime hash is not configured on the server.')
   const valid = await routerIsValid(link.router).catch(() => null)
   if (valid === null) return fail('rpc_unavailable', 'The Arc Mainnet RPC could not be verified. Try again shortly.')
   if (!valid) return fail('router_invalid', 'The payment contract for this link could not be verified on Arc Mainnet.')
 
-  const receipt = await client.getTransactionReceipt({ hash: txHash }).catch(() => null)
-  if (!receipt) return fail('not_found', 'That transaction is not on Arc Mainnet yet. Wait for it to confirm and try again.')
-  if (receipt.status !== 'success') return fail('reverted', 'That transaction failed onchain, so no payment was made.')
-
-  const block = await client.getBlock({ blockNumber: receipt.blockNumber }).catch(() => null)
-  if (!block) return fail('rpc_unavailable', 'Could not read the transaction block. Try again shortly.')
-  const paidAt = Number(block.timestamp) * 1000
+  const read = await readReceipt(txHash)
+  if (read.error) return read.error
+  const { receipt, paidAt } = read
   if (paidAt < link.createdAt) return fail('before_link', 'That payment was made before this link existed.')
   if (link.expiresAt && paidAt > link.expiresAt) return fail('after_expiry', 'That payment was made after this link expired.')
 
@@ -109,11 +106,15 @@ async function verifyRouterPayment(link: DbLink & { router: `0x${string}` }, txH
       lastFailure = fail('self_payment', 'A wallet cannot pay its own payment link.')
       continue
     }
-    if (expected !== undefined ? amount !== expected : amount <= 0n) {
+    if (amount <= 0n || (expected !== undefined && amount !== expected)) {
       lastFailure = fail('wrong_amount', 'The amount paid does not match this link’s fixed amount.')
       continue
     }
-    if (event.logIndex === null || !hasUsdcMovement(receipt.logs, payer, recipient, amount, event.logIndex)) {
+    const previousEventIndex = events.filter((other) => other.logIndex !== null && event.logIndex !== null && other.logIndex < event.logIndex)
+      .reduce((latest, other) => Math.max(latest, other.logIndex ?? -1), -1)
+    const transfer = [...receipt.logs].sort((a, b) => (b.logIndex ?? -1) - (a.logIndex ?? -1)).map(movement).find((m) => m && event.logIndex !== null && m.logIndex > previousEventIndex && m.logIndex < event.logIndex &&
+      m.from.toLowerCase() === payer.toLowerCase() && m.to.toLowerCase() === recipient.toLowerCase() && m.value === amount * SCALE)
+    if (!transfer) {
       lastFailure = fail('no_transfer', 'No matching USDC transfer was found in that transaction.')
       continue
     }
@@ -121,7 +122,7 @@ async function verifyRouterPayment(link: DbLink & { router: `0x${string}` }, txH
       ok: true,
       payment: {
         txHash,
-        logIndex: event.logIndex,
+        logIndex: transfer.logIndex,
         payer: getAddress(payer),
         amountRaw: amount.toString(),
         blockNumber: receipt.blockNumber.toString(),
@@ -138,33 +139,27 @@ async function verifyRouterPayment(link: DbLink & { router: `0x${string}` }, txH
  * a USDC Transfer to the link's recipient, the right amount, and inside the link's validity window.
  */
 export async function verifyPayment(link: DbLink, txHash: `0x${string}`): Promise<VerifyResult> {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return fail('bad_hash', 'Transaction hash is invalid.')
   if (link.router) return verifyRouterPayment({ ...link, router: link.router }, txHash)
   if (!(await rpcIsArcMainnet())) return fail('rpc_unavailable', 'The Arc Mainnet RPC could not be verified. Try again shortly.')
 
-  const receipt = await client.getTransactionReceipt({ hash: txHash }).catch(() => null)
-  if (!receipt) return fail('not_found', 'That transaction is not on Arc Mainnet yet. Wait for it to confirm and try again.')
-  if (receipt.status !== 'success') return fail('reverted', 'That transaction failed onchain, so no payment was made.')
-
-  const block = await client.getBlock({ blockNumber: receipt.blockNumber }).catch(() => null)
-  if (!block) return fail('rpc_unavailable', 'Could not read the transaction block. Try again shortly.')
-  const paidAt = Number(block.timestamp) * 1000
+  const read = await readReceipt(txHash)
+  if (read.error) return read.error
+  const { receipt, paidAt } = read
   if (paidAt < link.createdAt) return fail('before_link', 'That payment was made before this link existed.')
   if (link.expiresAt && paidAt > link.expiresAt) return fail('after_expiry', 'That payment was made after this link expired.')
 
+  // Router transactions cannot also settle legacy links, including records saved with old event indices.
+  const paymentTopic = toEventSelector('PaymentReceived(bytes32,address,address,uint256,bytes32)')
+  if (receipt.logs.some((log) => log.topics[0] === paymentTopic)) return fail('router_payment', 'A router payment cannot be claimed by a direct-transfer link.')
   const recipient = link.recipient.toLowerCase()
-  const candidates = receipt.logs.flatMap((log) => {
-    if (log.address.toLowerCase() !== ARC_SYSTEM_EMITTER.toLowerCase()) return []
-    if (log.topics.length !== 3 || log.topics[0] !== TRANSFER_TOPIC || !log.topics[1] || !log.topics[2]) return []
-    const to = `0x${log.topics[2].slice(26)}`
-    if (to.toLowerCase() !== recipient) return []
-    return [{ from: getAddress(`0x${log.topics[1].slice(26)}`), value: BigInt(log.data), logIndex: log.logIndex }]
-  })
+  const candidates = receipt.logs.map(movement).filter((m): m is NonNullable<typeof m> => m !== null && m.to.toLowerCase() === recipient && m.from.toLowerCase() !== recipient)
   if (candidates.length === 0) return fail('no_transfer', 'That transaction did not send USDC to this link’s recipient.')
 
   let match: (typeof candidates)[number] | undefined
   if (link.mode === 'fixed') {
     const expected = BigInt(link.amountRaw ?? '0') * SCALE
-    match = candidates.find((c) => c.value === expected)
+    match = candidates.find((c) => c.value > 0n && c.value === expected)
     if (!match) return fail('wrong_amount', 'The amount sent does not match this link’s fixed amount.')
   } else {
     match = candidates.filter((c) => c.value >= SCALE).sort((a, b) => (a.value > b.value ? -1 : 1))[0]

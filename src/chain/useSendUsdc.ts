@@ -3,7 +3,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useWriteContract } from 'wagmi'
 import { erc20Abi } from 'viem'
 import { parseTxError, type ParsedTxError } from '@/lib/errors'
-import { pushNotification, settingsStore, upsertLocalTx } from '@/stores'
+import { pushNotification, settingsStore, txStore, upsertLocalTx } from '@/stores'
+import { checkoutBlocked } from './transaction-recovery'
 import { formatUsdc } from '@/lib/format'
 import type { ActivityKind, Address, Hex } from '@/domain/types'
 import { CONFIRMATIONS, clientFor } from './client'
@@ -55,6 +56,7 @@ export function useSendUsdc(networkOverride?: Network) {
   const send = useCallback(
     async (params: SendParams) => {
       if (!address || inFlight.current) return
+      if (params.kind === 'payment-link' && params.linkId && checkoutBlocked(txStore.get(), params.linkId, params.to, false)) return
       inFlight.current = true
       const kind = params.kind ?? 'transfer'
       const notifyOutgoing = settingsStore.get().notifyOutgoing
@@ -102,7 +104,17 @@ export function useSendUsdc(networkOverride?: Network) {
           hash,
           confirmations: CONFIRMATIONS,
           timeout: WAIT_MS,
+          onReplaced: kind === 'payment-link' ? ({ replacedTransaction, transaction }) => {
+            if (replacedTransaction.from.toLowerCase() === address.toLowerCase() && replacedTransaction.hash.toLowerCase() === hash.toLowerCase()) {
+              upsertLocalTx({ ...base, status: 'pending', nonce: replacedTransaction.nonce, replacementHash: transaction.hash })
+            }
+          } : undefined,
         })
+        if (kind === 'payment-link' && receipt.transactionHash.toLowerCase() !== hash.toLowerCase()) {
+          upsertLocalTx({ ...base, status: 'pending', replacementHash: receipt.transactionHash })
+          setState({ phase: 'unconfirmed', params, hash })
+          return
+        }
         const amountText = `${formatUsdc(params.amountRaw)} USDC`
         if (receipt.status === 'success') {
           upsertLocalTx({ ...base, status: 'completed', confirmedAt: Date.now(), blockNumber: receipt.blockNumber.toString() })

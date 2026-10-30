@@ -22,7 +22,7 @@ React, TypeScript, Vite, Tailwind CSS, Privy (`@privy-io/react-auth`, `@privy-io
 
 ## Development
 
-Prerequisites: [Bun](https://bun.sh).
+Prerequisites: [Bun](https://bun.sh). Contract tests also require Foundry and `forge-std` (for example, clone the reviewed `v1.9.7` tag into the ignored `lib/forge-std` directory); OpenZeppelin is restored by `bun install`.
 
 ```bash
 bun install
@@ -30,7 +30,8 @@ bun run server   # payment link server on :3001 (the dev server proxies /api to 
 bun run dev      # app on http://localhost:5173
 bun run check    # lint and typecheck
 bun run contracts:build && bun run contracts:test   # CooketPayRouter build and unit tests (Foundry)
-bun run test:router   # payment verification against a local test chain (needs Foundry's anvil and a prior forge build)
+bun run test:verify   # offline receipt/router verification fixtures (no transactions)
+bun run test:api      # offline API and fake PostgREST storage tests
 ```
 
 ### Privy setup
@@ -43,14 +44,19 @@ In the Privy Dashboard for your app, enable the Email, Google, X (Twitter), and 
 - `RPC_PROXY_BASE_URL`, `RPC_PROXY_TOKEN`, `RPC_PROXY_CHAINS`: optional, provisioned by Arc Studio. When they cover Arc, the server uses them for RPC; otherwise it uses the public Arc Mainnet RPC.
 - `VITE_COOKET_ROUTER_ADDRESS`: optional, address of the deployed CooketPayRouter contract on Arc Mainnet (a public address). Read by the payment server. When set, new payment links settle through the contract and are verified from its event; when unset, links use direct USDC transfers.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`: server-only. Durable storage for payment links (Supabase Postgres). Required in production; never give them a `VITE_` prefix and never expose them to the browser. Without them the server uses a local JSON file in development and refuses to run on Vercel.
-- `SUPABASE_ANON_KEY`: optional, used only by `bun run check:storage` to prove the public key cannot read the tables.
+- `COOKET_ROUTER_CODE_HASH`: server-only configuration required for router-backed links, the keccak256 hash of the independently verified deployed CooketPayRouter runtime bytecode, including its immutable USDC address. Compare the runtime with the reviewed Solidity build before pinning its hash; copying a hash from an untrusted RPC alone does not establish contract identity. A missing or mismatched hash prevents router payment verification. When `VITE_COOKET_ROUTER_ADDRESS` is set without a valid hash, health and new-link creation fail closed. Previously created router links also require this hash even when new links use direct transfers.
+- `SUPABASE_ANON_KEY`: optional, used only by the read-only `bun run check:storage` public-read smoke check. Empty results alone do not establish correct RLS.
 - `ARC_RPC_URL`: optional, a private Arc Mainnet RPC for the server (default: the public RPC from the chain registry).
 - `PORT`: optional, port for the payment server (default 3001).
-- `COOKET_DATA_FILE`: optional, path of the payment server's data file (default `server/data/db.json`).
+- `COOKET_DATA_FILE`: optional, local-development file-store path (default `server/data/db.json`). Ignored when Supabase storage is selected; the file store is prohibited on Vercel.
 
 ### Payment contract
 
-`contracts/CooketPayRouter.sol` is an ownerless checkout contract. A payer approves the exact amount, then calls `pay`, which sends USDC straight to the merchant and logs the payment against the link. It holds no funds and has no admin functions. Deploy it yourself with your own wallet and set `VITE_COOKET_ROUTER_ADDRESS` afterwards.
+`contracts/CooketPayRouter.sol` is an ownerless checkout contract. A payer approves the exact amount, then calls `pay`, which sends USDC straight to the merchant and logs the payment against the link. It does not custody payments and has no admin, fee, or withdrawal functions. The constructor fixes a token address; it does not enforce a chain ID or hardcode the token. Any future user-managed Arc Mainnet deployment must use chain **5042** and USDC **`0x3600000000000000000000000000000000000000`** (6 decimals). No contract deployment is established by this repository review.
+
+The server checks Arc chain identity, pinned runtime code and the `USDC()` getter. It credits a matching `PaymentReceived` only alongside a preceding system-emitter USDC movement from the event payer to the link recipient, in a successful canonical receipt inside the link window. The system movement uses 18 decimals and is converted to the token's 6 decimals; its ERC-20 mirror is never added to it. The transfer's `(tx_hash, log_index)` is the claim key. Router transactions cannot also pay legacy direct-transfer links. Retries preserve older router records that used event indices through an exact `(link_id, tx_hash)` lookup, independently of paginated payment lists. Database uniqueness still enforces `(tx_hash, log_index)` globally; the lookup itself is not the concurrent replay guard. Receipts need one confirmation, consistent with the existing send flow; this does not establish longer-term finality.
+
+Checkout requests an exact-amount allowance and a separate `pay` signature. Existing sufficient allowances can skip approval. Neither approval nor transaction submission marks a link paid: the API must verify and persist the payment. Network switching remains an explicit user action.
 
 ### Production (Vercel)
 
@@ -59,15 +65,37 @@ The app is a Vite static site plus one Vercel Function for the payment link API.
 - `api/[...path].mjs` serves everything under `/api/*`. It loads `api/_handler.mjs`, which the `vercel-build` script generates from `server/handler.ts` with esbuild (the file is not committed).
 - The browser calls `/api/...` on the same origin, so no CORS headers are sent or needed.
 - `vercel.json` adds the single-page-app rewrite (everything except `/api` serves `index.html`), a 30 second function limit, and basic security headers.
-- Create the tables once by running `supabase/migrations/0001_payment_links.sql` in the Supabase SQL editor, then `bun run check:storage` to confirm.
+- Reconcile the database schema and migration history using the sequence below; existing tables and data must be preserved.
 - Set the environment variables above in the Vercel project (Production and Preview), then redeploy. Mark the Supabase service role key as sensitive.
-- Check a deployment: `GET /api/health` should report `"storage":"supabase"`, `"chainId":5042`, and the router address once configured.
+- `GET /api/health` reports configured storage, chain ID, auth presence and router configuration. Missing Vercel storage or invalid router configuration returns 503. A 200 response is a configuration/liveness check: it does **not** contact Supabase or RPC, verify migration application, or establish router deployment.
+
+### Supabase migration sequence
+
+Production payment links, verified payments and creation nonces use Supabase Postgres through server-only PostgREST calls with `SUPABASE_SERVICE_ROLE_KEY`. There is no JSON production fallback on Vercel.
+
+Before applying SQL, inspect the actual migration history, column types, constraints, RLS and grants in the target database. This review does not connect to production or establish its current schema.
+
+1. For a new, empty project, apply `supabase/migrations/0001_payment_links.sql`, then `0002_payment_links_router.sql`. The baseline defines `payment_links`, `link_payments`, and `used_nonces`, their indexes and uniqueness constraints, and RLS with public-role privileges revoked.
+2. For an existing database where the baseline is already recorded, preserve that history and apply only the new `0002` migration. It adds nullable `payment_links.router` if missing and otherwise does nothing to that column. It leaves all rows and legacy tables intact and reloads the PostgREST schema cache. Existing links with no router stay direct-transfer links. An existing incompatible router column causes a rollback.
+3. `0002` assumes all other baseline columns, keys, types and RLS already exist. It does not repair arbitrary legacy schemas. If tables exist but `0001` is absent from the migration ledger, inspect and reconcile the ledger against the actual schema first; do not blindly replay the baseline over unknown live tables. `CREATE TABLE IF NOT EXISTS` does not repair missing columns or constraints.
+4. Expected columns are `payment_links(id, owner_did, recipient, description, merchant, mode, amount_raw, expires_at, created_at, inactive, router)`, `link_payments(link_id, tx_hash, log_index, payer, amount_raw, block_number, paid_at, verified_at)`, and `used_nonces(nonce, used_at)`. Amounts and block numbers are text; timestamps are bigint milliseconds; log indices are integers. Replay protection depends on the `used_nonces(nonce)` and `link_payments(tx_hash, log_index)` primary keys; payment ownership depends on the `link_id` foreign key.
+5. `bun run check:storage` performs read-only column/read-access checks against the explicitly configured project. It never inserts probe rows or deletes data. It cannot prove unique constraints or RLS on empty tables; inspect those separately. Use isolated local Postgres for mutation tests. No migration has been applied to production by this task.
+
+Nonce reservation and link insertion are separate PostgREST requests. If insertion fails after reservation, creation fails closed and the merchant must create a fresh signature/nonce; it does not falsely report a created link.
 
 ### Tests
 
 - `bun run contracts:test`: CooketPayRouter unit tests (Foundry).
-- `bun run test:router`: payment verification against a local test chain.
+- `bun run test:verify`: offline verifier fixtures, including counterfeit router code, wrong chain/event/link/payer/recipient/amount, missing movements, reorged or malformed receipts, and router/legacy replay.
+- `bun run test:migrations`: disposable local PostgreSQL tests for fresh, current, and pre-router schemas, data preservation and uniqueness (requires local PostgreSQL binaries).
+- `bun run test:router`: compatibility entry point for the same offline verifier fixtures. It never deploys contracts or signs transactions.
+- `bun run test:router:abi`: reads the compiled router artifact and checks shared ABI selectors, outputs and indexed event fields. Run `bun run contracts:build` first. No RPC or transactions.
+- `bun run test:router:anvil`: retained contract-to-verifier integration harness in `contracts/test-integration/router-anvil.ts`. It refuses to start without `COOKET_RUN_ANVIL_TRANSACTIONS=1`. **Do not opt in under a no-deployment/no-signing rule**: this harness deploys and signs on an unforked, loopback-only Anvil chain. Its test-only token emits both the canonical system Transfer at 18 decimals and the ERC-20 mirror at 6 decimals. It is an approximation of Arc logs and cannot establish real Arc behavior. This review only bundles the harness; it does not execute it.
 - `bun run test:api`: the payment link API and storage layer, offline.
+- `bun run test:checkout-recovery`: offline reload, registration retry/idempotence, RPC outage and positive cancellation-evidence checks for router and legacy checkout.
+- `bun run test:file-store`: development file-store preservation, read-error and concurrent-write tests against disposable local files.
+
+The existing `scripts/compass-deploy.ts` imports `@circlefin/compass-chains`, which is absent from the package manifest/lockfile. The public npm registry lookup also returned HTTP 404 for that package. Full-project lint/typecheck remain blocked; obtain the intended package source and pinned version before changing dependencies. No substitute registry or guessed version is used, and no exclusion is added to the project checks. Payment verification tests do not import or execute deployment tooling.
 
 ### Network
 
@@ -75,4 +103,8 @@ Arc Mainnet only (chain ID 5042). USDC is the gas token. Chain, RPC, USDC addres
 
 ### Data
 
-Contacts, notes, preferences, and records of payments sent from this browser live in local storage. Payment links and their verified payments are stored by the payment server in a JSON file. For production, deploy the server with durable storage and the same Privy App ID.
+Contacts, notes, preferences, and records of payments sent from this browser live in local storage. Production payment links, verified payments, and signature nonces live in Supabase Postgres. Local development uses `server/data/db.json` only when Supabase is not configured. Browser preferences remain in local storage. Production readiness still requires verified migration history/RLS/constraints, server secrets, Privy origin setup, an independently verified router and pinned runtime hash if router checkout is enabled, and separate live RPC/Supabase verification. Offline tests and a local build do not establish any of these live conditions.
+
+The development file store initializes empty only when the database path is absent. Empty, malformed, unreadable or non-regular existing files fail closed and are never automatically replaced. Writers use an exclusive `.lock` file, fresh reads and a pre-commit change check; a leftover lock requires manual inspection. This coordinates cooperating writers using the same path, not arbitrary external editors that ignore the lock.
+
+Checkout restores saved pending and confirmed-but-unregistered payment-link transactions from local storage. It retries the existing server verification API without requesting another wallet signature; unresolved attempts block another payment. Generic RPC errors and missing transaction lookups remain unknown/pending, regardless of elapsed time. Failure requires a canonical reverted receipt or a confirmed same-nonce cancellation/reverted replacement; a replacement hash alone is insufficient. Recovery requires retained browser records and RPC/API availability; clearing browser storage or moving to another device is not covered.

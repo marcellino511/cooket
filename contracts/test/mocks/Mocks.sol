@@ -16,6 +16,24 @@ contract MockUSDC is ERC20 {
     }
 }
 
+/// @dev Local-test-only emitter; installed at Arc's system-emitter address by the opt-in harness.
+contract ArcSystemEmitterMock {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    function logTransfer(address from, address to, uint256 value) external {
+        require(msg.sender == 0x3600000000000000000000000000000000000000, "test token only");
+        emit Transfer(from, to, value);
+    }
+}
+
+/// @dev Local-test-only approximation of Arc's dual ERC-20/system log surfaces. Not a production token.
+contract ArcMockUSDC is MockUSDC {
+    function _update(address from, address to, uint256 value) internal override {
+        super._update(from, to, value);
+        ArcSystemEmitterMock(0xffffFFFfFFffffffffffffffFfFFFfffFFFfFFfE).logTransfer(from, to, value * 1e12);
+    }
+}
+
 /// @dev transferFrom returns false instead of reverting (non-standard token).
 contract FalseReturnToken {
     function decimals() external pure returns (uint8) {

@@ -22,6 +22,8 @@ export class StorageNotConfigured extends Error {}
 export interface Store {
   readonly kind: 'supabase' | 'file'
   getLink(id: string): Promise<LinkWithPayments | null>
+  /** Exact lookup, independent of any paginated list of the link's payments. */
+  findPayment(linkId: string, txHash: string): Promise<LinkPayment | null>
   listByOwner(ownerDid: string): Promise<LinkWithPayments[]>
   /** Stores the link and burns the creation nonce atomically enough that a replayed signature fails with StoreConflict('replayed'). */
   createLink(link: DbLink, nonce: string): Promise<void>
